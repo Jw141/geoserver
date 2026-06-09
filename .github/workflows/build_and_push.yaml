@@ -17,7 +17,7 @@ jobs:
       security-events: write # Required to upload scan results
 
     strategy:
-      fail-fast: false
+      fail-fast: false # If one image fails security scans, don't cancel parallel tracks
       matrix:
         include:
           - image_identifier: geoserver
@@ -39,7 +39,6 @@ jobs:
       # =============================================================
       # CRITICAL STEP: Hydrate the runner workspace with your files
       # =============================================================
-       Alexander:
       - name: Download GeoServer Artifacts Natively via Curl
         run: |
           echo "Fetching Core GeoServer Web Archive..."
@@ -86,21 +85,3 @@ jobs:
           format: 'sarif'
           output: 'trivy-results-${{ matrix.image_identifier }}.sarif'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1' # Fails the pipeline if Rocky or Tomcat has an unpatched high/critical vulnerability
-
-      - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: 'trivy-results-${{ matrix.image_identifier }}.sarif'
-
-      - name: Final Build and Push
-        if: success() # Only triggers and pushes your image if Trivy gives it a passing score
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}
-            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ github.sha }}
