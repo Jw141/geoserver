@@ -1,0 +1,106 @@
+name: Build and Secure GeoServer Ecosystem
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      security-events: write # Required to upload scan results
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_identifier: geoserver
+            image_name: jw141/geoserver
+            dockerfile: Dockerfile
+            prod_tag: 3.0-rockylinux9.7
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # =============================================================
+      # CRITICAL STEP: Hydrate the runner workspace with your files
+      # =============================================================
+       Alexander:
+      - name: Download GeoServer Artifacts Natively via Curl
+        run: |
+          echo "Fetching Core GeoServer Web Archive..."
+          curl -L -s -o geoserver-3.0-RC-war.zip \
+            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/geoserver-3.0-RC-war.zip/download"
+          
+          echo "Fetching Stable Core Extensions..."
+          curl -L -s -o geoserver-3.0-RC-vectortiles-plugin.zip \
+            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/extensions-RC/geoserver-3.0-RC-vectortiles-plugin.zip/download"
+          curl -L -s -o geoserver-3.0-RC-control-flow-plugin.zip \
+            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/extensions-RC/geoserver-3.0-RC-control-flow-plugin.zip/download"
+          
+          echo "Fetching Community/Raster Extensions from OSGeo Release Storage..."
+          curl -L -s -o geoserver-3.0-SNAPSHOT-imagemosaic-jdbc-plugin.zip \
+            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-imagemosaic-jdbc/3.0.0/gs-imagemosaic-jdbc-3.0.0.zip"
+          curl -L -s -o geoserver-3.0-SNAPSHOT-cog-http-plugin.zip \
+            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-http/3.0.0/gs-cog-http-3.0.0.zip"
+          curl -L -s -o geoserver-3.0-SNAPSHOT-cog-s3-plugin.zip \
+            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-s3/3.0.0/gs-cog-s3-3.0.0.zip"
+          
+          echo "Verifying all cached artifacts exist in current build track:"
+          ls -lh geoserver-3.0-*.zip
+
+      - name: Build and Load Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true # Loads image into local runner context so Trivy can analyze it
+          tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+
+      - name: Run Trivy (Table output for logs)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Run Trivy (SARIF for Security tab)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.image_identifier }}.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1' # Fails the pipeline if Rocky or Tomcat has an unpatched high/critical vulnerability
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results-${{ matrix.image_identifier }}.sarif'
+
+      - name: Final Build and Push
+        if: success() # Only triggers and pushes your image if Trivy gives it a passing score
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ github.sha }}
