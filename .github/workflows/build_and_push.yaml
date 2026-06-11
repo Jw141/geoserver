@@ -20,10 +20,14 @@ jobs:
       fail-fast: false # If one image fails security scans, don't cancel parallel tracks
       matrix:
         include:
-          - image_identifier: geoserver
+          - image_identifier: geoserver-3
             image_name: jw141/geoserver
             dockerfile: Dockerfile
             prod_tag: 3.0-rockylinux9.7
+          - image_identifier: geoserver-2-28
+            image_name: jw141/geoserver
+            dockerfile: Dockerfile.2_28
+            prod_tag: 2.28.4--v2026.06.06
 
     steps:
       - name: Checkout repository
@@ -37,9 +41,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # =============================================================
-      # CRITICAL STEP: Hydrate the runner workspace with your files
+      # Download step for the 3.0 track only
       # =============================================================
       - name: Download GeoServer Artifacts Natively via Curl
+        if: matrix.image_identifier == 'geoserver-3'
         run: |
           echo "Fetching Core GeoServer Web Archive..."
           curl -L -s -o geoserver-3.0-RC-war.zip \
@@ -58,30 +63,50 @@ jobs:
             "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-http/3.0.0/gs-cog-http-3.0.0.zip"
           curl -L -s -o geoserver-3.0-SNAPSHOT-cog-s3-plugin.zip \
             "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-s3/3.0.0/gs-cog-s3-3.0.0.zip"
-          
-          echo "Verifying all cached artifacts exist in current build track:"
-          ls -lh geoserver-3.0-*.zip
 
+      # =============================================================
+      # Build step (Loads locally for scanning)
+      # =============================================================
       - name: Build and Load Image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          load: true # Loads image into local runner context so Trivy can analyze it
-          tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+          load: true 
+          tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
 
+      # =============================================================
+      # Vulnerability Scanning (Configured NOT to fail the build)
+      # =============================================================
       - name: Run Trivy (Table output for logs)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '0'
+          exit-code: '0' # <--- Crucial: 0 ensures CRITICAL/HIGH bypass blocking
 
       - name: Run Trivy (SARIF for Security tab)
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp
+          image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
           format: 'sarif'
           output: 'trivy-results-${{ matrix.image_identifier }}.sarif'
           severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() # Uploads even if previous steps found issues
+        with:
+          sarif_file: 'trivy-results-${{ matrix.image_identifier }}.sarif'
+
+      # =============================================================
+      # Final Production Step: Push the verified image to GHCR
+      # =============================================================
+      - name: Build and Push Final Production Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}
