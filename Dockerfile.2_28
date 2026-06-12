@@ -32,21 +32,24 @@ RUN curl -L -s -o /tmp/extracted_jars/opentelemetry-javaagent-2.26.1.jar \
     "https://repo1.maven.org/maven2/org/bouncycastle/bcprov-jdk15to18/1.84/bcprov-jdk15to18-1.84.jar"
 
 # =================================================================
-# STAGE 2: Purge vulnerable files and assemble the patched image
+# STAGE 2: Assemble the patched image and archive the source zips
 # =================================================================
 FROM kartoza/geoserver:2.28.4--v2026.06.06
 
-LABEL description="GeoServer 2.28.4 patched against vulnerable OpenTelemetry and BouncyCastle distributions"
+LABEL description="GeoServer 2.28.4 with a built-in offline archive of its S3 extension zips"
 
-# Explicitly use root as required by Kartoza base configurations
 USER root
 
 # 1. Purge the existing vulnerable files from the Kartoza base image
 RUN rm -f /usr/local/tomcat/webapps/geoserver/WEB-INF/lib/opentelemetry-javaagent*.jar \
     && rm -f /usr/local/tomcat/webapps/geoserver/WEB-INF/lib/bcprov-*.jar
 
-# 2. Inject all updated mosaic plugins AND the newly downloaded patch JARs
+# 2. Inject active application libraries so GeoServer functions out-of-the-box
 COPY --from=downloader /tmp/extracted_jars/*.jar /usr/local/tomcat/webapps/geoserver/WEB-INF/lib/
-
-# 3. Apply basic global read permissions for the newly introduced libraries
 RUN chmod 644 /usr/local/tomcat/webapps/geoserver/WEB-INF/lib/*.jar
+
+# 3. CREATE ARCHIVE BACKUP: Keep copies of the source zip files and security patches inside the image
+RUN mkdir -p /opt/geo-packages
+COPY --from=downloader /tmp/plugins/*.zip /opt/geo-packages/
+COPY --from=downloader /tmp/extracted_jars/opentelemetry-javaagent-2.26.1.jar /opt/geo-packages/
+COPY --from=downloader /tmp/extracted_jars/bcprov-jdk15to18-1.84.jar /opt/geo-packages/
