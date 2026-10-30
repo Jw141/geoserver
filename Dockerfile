@@ -1,88 +1,127 @@
-# ==========================================
-# STAGE 1: Process and Flatten Staged Zip Packages Local Context Only
-# ==========================================
-FROM docker.io/rockylinux/rockylinux:9.7 AS build-stage
-WORKDIR /downloads
+# syntax=docker/dockerfile:1.7
+#
+# Hardened GeoServer 3.0.x image for FIPS-enabled hosts.
+#   Base:    Rocky Linux 9 UBI-init (pinned by digest; this digest is the linux/amd64 image)
+#   Java:    distro-packaged OpenJDK 21 (the JVM that honours the RHEL system crypto policy)
+#   Servlet: Apache Tomcat 11 (GeoServer 3 needs Servlet API 6.1)
+#   Plugins: fips + cog-s3 + cog-http, built from the GeoServer git tag matching the release
+#
+# Community modules are NOT published with stable releases, and a module built against
+# a different core build usually fails. So we take the stable WAR and build the community
+# modules from the matching tag.
 
-RUN dnf install -y unzip tar && dnf clean all
+ARG BASE_IMAGE=rockylinux/rockylinux:9-ubi-init@sha256:3ce8a19ffda84f34b790ce6e4575fb1bccca97df3ab43e464df1675cabde52f6
+ARG GS_VERSION=3.0.2
 
-# 1. Expand the core GeoServer archive package
-COPY geoserver-3.0-RC-war.zip /downloads/
-RUN mkdir -p /downloads/geoserver_war /downloads/geoserver && \
-    unzip -q geoserver-3.0-RC-war.zip -d /downloads/geoserver_war && \
-    unzip -q /downloads/geoserver_war/geoserver.war -d /downloads/geoserver && \
-    rm -rf geoserver-3.0-RC-war.zip /downloads/geoserver_war
+############################################################################
+# Stage 1: build the community plugin jars from the matching git tag
+############################################################################
+FROM ${BASE_IMAGE} AS plugins
+ARG GS_VERSION
+ARG GS_GIT_REF=${GS_VERSION}
+ARG MAVEN_VERSION=3.9.11
 
-# Shift context directly into the web application classpath
-WORKDIR /downloads/geoserver/WEB-INF/lib
+RUN dnf -y install --setopt=install_weak_deps=False java-21-openjdk-devel git tar gzip findutils \
+ && dnf clean all
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 
-# 2. Copy and unfold your five downloaded stable and community zip packages
-COPY geoserver-3.0-*.zip ./
-RUN for f in *.zip; do unzip -q -o "$f"; rm -f "$f"; done
+WORKDIR /opt
+RUN set -eux; \
+    base="https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries"; \
+    curl -fsSLO "${base}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"; \
+    curl -fsSLO "${base}/apache-maven-${MAVEN_VERSION}-bin.tar.gz.sha512"; \
+    echo "$(cat apache-maven-${MAVEN_VERSION}-bin.tar.gz.sha512)  apache-maven-${MAVEN_VERSION}-bin.tar.gz" | sha512sum -c -; \
+    mkdir maven; tar -xzf apache-maven-${MAVEN_VERSION}-bin.tar.gz -C maven --strip-components=1
+ENV PATH=/opt/maven/bin:${PATH}
 
-# Eliminate alternative cloud platform cross-contamination
-RUN rm -f *google* *azure*
+WORKDIR /src
+RUN git clone --depth 1 --branch "${GS_GIT_REF}" https://github.com/geoserver/geoserver.git .
 
+# Build fips + cog-s3 + cog-http and collect jars into /out/lib (see scripts/build-plugins.sh)
+COPY scripts/build-plugins.sh /usr/local/bin/build-plugins.sh
+RUN --mount=type=cache,target=/root/.m2 bash /usr/local/bin/build-plugins.sh
 
-# ==========================================
-# STAGE 2: Hardened Rocky Linux 9.7 Diagnostic Runtime
-# ==========================================
-FROM docker.io/rockylinux/rockylinux:9.7
+############################################################################
+# Stage 2: assemble webapp (stable WAR + FIPS jar swap + plugins) and Tomcat
+############################################################################
+FROM ${BASE_IMAGE} AS assemble
+ARG GS_VERSION
+ARG GS_WAR_URL=https://downloads.sourceforge.net/project/geoserver/GeoServer/${GS_VERSION}/geoserver-${GS_VERSION}-war.zip
+ARG GS_WAR_SHA256=""
+ARG TOMCAT_VERSION=11.0.25
 
-LABEL org.opencontainers.image.title="Hardened GeoServer Enterprise Suite" \
-      org.opencontainers.image.description="GeoServer 3.0 on Rocky Linux 9.7 featuring optimized Java performance, native PostGIS mosaic pooling, and integrated telemetry utilities." \
-      org.opencontainers.image.vendor="Radix Metasystems"
+RUN dnf -y install --setopt=install_weak_deps=False unzip tar gzip findutils && dnf clean all
 
-# 1. Patch systemic vulnerabilities and register enterprise repositories
-RUN dnf clean all && \
-    dnf update -y --refresh && \
-    dnf install -y epel-release && \
-    dnf config-manager --set-enabled crb
+WORKDIR /build
+RUN set -eux; \
+    curl -fsSL -o war.zip "${GS_WAR_URL}"; \
+    if [ -n "${GS_WAR_SHA256}" ]; then echo "${GS_WAR_SHA256}  war.zip" | sha256sum -c -; fi; \
+    unzip -q war.zip geoserver.war; \
+    mkdir geoserver; unzip -q geoserver.war -d geoserver
 
-# 2. Install Java 17 and native diagnostic packages (PostGIS standards)
-RUN dnf install -y --allowerasing \
-    java-17-openjdk-headless \
-    wget \
-    tar \
-    procps-ng \
-    htop \
-    iputils \
-    less \
-    ncurses && \
-    dnf clean all
+RUN set -eux; \
+    base="https://archive.apache.org/dist/tomcat/tomcat-11/v${TOMCAT_VERSION}/bin"; \
+    curl -fsSLO "${base}/apache-tomcat-${TOMCAT_VERSION}.tar.gz"; \
+    curl -fsSLO "${base}/apache-tomcat-${TOMCAT_VERSION}.tar.gz.sha512"; \
+    sha512sum -c "apache-tomcat-${TOMCAT_VERSION}.tar.gz.sha512"; \
+    mkdir tomcat; tar -xzf "apache-tomcat-${TOMCAT_VERSION}.tar.gz" -C tomcat --strip-components=1
 
-ENV CATALINA_HOME=/usr/local/tomcat
-ENV PATH=$CATALINA_HOME/bin:$PATH
-WORKDIR /usr/local
+COPY --from=plugins /out/lib /build/plugin-lib
 
-# 3. Provision Tomcat 11 for modern Jakarta EE 10 compliance
-RUN wget -q https://archive.apache.org/dist/tomcat/tomcat-11/v11.0.0-M20/bin/apache-tomcat-11.0.0-M20.tar.gz && \
-    tar -xf apache-tomcat-11.0.0-M20.tar.gz && \
-    mv apache-tomcat-11.0.0-M20 $CATALINA_HOME && \
-    rm -f apache-tomcat-11.0.0-M20.tar.gz && \
-    rm -rf $CATALINA_HOME/webapps/*
+COPY scripts/assemble-plugins.sh /usr/local/bin/assemble-plugins.sh
+RUN bash /usr/local/bin/assemble-plugins.sh /build/geoserver /build/plugin-lib
 
-# 4. Extract completed web application layer from Stage 1
-COPY --from=build-stage /downloads/geoserver $CATALINA_HOME/webapps/geoserver
+RUN set -eux; cd tomcat; \
+    rm -rf webapps/* webapps.dist bin/*.bat; \
+    mkdir -p webapps; mv /build/geoserver webapps/geoserver; \
+    sed -i 's|<Server port="8005"|<Server port="-1"|' conf/server.xml; \
+    sed -i 's|<Connector port="8080"|<Connector port="8080" server="GeoServer" xpoweredBy="false"|' conf/server.xml; \
+    sed -i 's|</Host>|  <Valve className="org.apache.catalina.valves.ErrorReportValve" showReport="false" showServerInfo="false"/>\n      </Host>|' conf/server.xml; \
+    grep -q 'port="-1"' conf/server.xml && grep -q showServerInfo conf/server.xml
 
-# 5. Establish core persistent mount zones
-RUN mkdir -p /opt/geoserver_data /data/rasters /var/geowebcache
+############################################################################
+# Stage 3: runtime
+############################################################################
+FROM ${BASE_IMAGE} AS runtime
+ARG GS_UID=10001
+ARG GS_VERSION
+LABEL org.opencontainers.image.title="geoserver-fips" \
+      org.opencontainers.image.version="${GS_VERSION}" \
+      org.opencontainers.image.description="Hardened GeoServer with FIPS, cog-s3, cog-http on Rocky Linux 9"
 
-# 6. Inject the administrative initialization script for runtime credential overrides
-COPY geoserver-init.sh /usr/local/bin/geoserver-init.sh
-RUN chmod +x /usr/local/bin/geoserver-init.sh
+# Patch the whole base image first: the digest-pinned base is only as fresh as when it was published.
+RUN dnf -y upgrade --refresh \
+ && dnf -y install --setopt=install_weak_deps=False \
+        java-21-openjdk-headless nss openssl-libs fontconfig freetype dejavu-sans-fonts crypto-policies-scripts \
+ && update-crypto-policies --set FIPS \
+ && dnf -y remove crypto-policies-scripts \
+ && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* \
+ && (find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true)
 
-# 7. Operational Tuning Parameters
-ENV GEOSERVER_DATA_DIR=/opt/geoserver_data
-ENV GEOWEBCACHE_CACHE_DIR=/var/geowebcache
+ENV CATALINA_HOME=/opt/tomcat \
+    GEOSERVER_DATA_DIR=/opt/geoserver_data \
+    JAVA_HOME=/usr/lib/jvm/jre-21-openjdk
 
-ENV CATALINA_OPTS="-Xms4g -Xmx4g \
-    -Djava.awt.headless=true \
-    -Daws.region=us-east-1 \
-    -Daws.s3Endpoint=http://your-internal-s3-cluster.local:9000 \
-    -Daws.s3SignerType=AWSS3V4SignerType \
-    -DSKIP_DEMO_DATA=true"
+RUN useradd --system --uid ${GS_UID} --gid 0 --no-create-home --home-dir /opt/tomcat --shell /sbin/nologin geoserver \
+ && mkdir -p ${GEOSERVER_DATA_DIR}
 
+COPY --from=assemble --chown=${GS_UID}:0 /build/tomcat ${CATALINA_HOME}
+RUN chown -R ${GS_UID}:0 ${GEOSERVER_DATA_DIR} \
+ && chmod -R g=u ${CATALINA_HOME}/conf ${CATALINA_HOME}/logs ${CATALINA_HOME}/temp ${CATALINA_HOME}/work ${GEOSERVER_DATA_DIR} \
+ && chmod -R go-w ${CATALINA_HOME}/bin ${CATALINA_HOME}/lib ${CATALINA_HOME}/webapps
+
+# Do NOT set -Dorg.bouncycastle.fips.approved_only=false; the FIPS module turns approved-only on.
+# hs_err logs land in Tomcat logs so a JVM crash leaves evidence (mount /opt/tomcat/logs if you want them off-container)
+ENV JAVA_OPTS="-Djava.awt.headless=true -XX:MaxRAMPercentage=75 -Dfile.encoding=UTF-8 -XX:ErrorFile=/opt/tomcat/logs/hs_err_pid%p.log"
+
+USER ${GS_UID}
+WORKDIR ${CATALINA_HOME}
+VOLUME ["/opt/geoserver_data"]
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/geoserver-init.sh"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD ["/bin/bash","-c","exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /geoserver/web/ HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -Eq ' (200|302) '"]
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT []
+CMD ["/opt/tomcat/bin/catalina.sh", "run"]

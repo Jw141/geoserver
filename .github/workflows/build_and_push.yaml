@@ -2,8 +2,11 @@ name: Build and Secure GeoServer Ecosystem
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+  pull_request:            # build + scan only, never pushes
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"    # weekly rebuild for base-image / OS package fixes
 
 env:
   REGISTRY: ghcr.io
@@ -14,99 +17,115 @@ jobs:
     permissions:
       contents: read
       packages: write
-      security-events: write # Required to upload scan results
+      security-events: write   # required to upload scan results
 
     strategy:
-      fail-fast: false # If one image fails security scans, don't cancel parallel tracks
+      fail-fast: false         # one failing track must not cancel the other
       matrix:
         include:
           - image_identifier: geoserver-3
             image_name: jw141/geoserver
             dockerfile: Dockerfile
-            prod_tag: 3.0-rockylinux9.7
+            gs_version: "3.0.2"
+            prod_tag: "3.0.2-rockylinux9"
+            smoke_test: true
           - image_identifier: geoserver-2-28
             image_name: jw141/geoserver
             dockerfile: Dockerfile.2_28
-            prod_tag: 2.28.4--v2026.06.06
+            gs_version: ""
+            prod_tag: "2.28.4--v2026.06.06"
+            smoke_test: false
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4          # pin to a commit SHA for production
+
+      - name: Set up Docker Buildx           # needed for the GHA layer cache
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # =============================================================
-      # Download step for the 3.0 track only
-      # =============================================================
-      - name: Download GeoServer Artifacts Natively via Curl
-        if: matrix.image_identifier == 'geoserver-3'
-        run: |
-          echo "Fetching Core GeoServer Web Archive..."
-          curl -L -s -o geoserver-3.0-RC-war.zip \
-            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/geoserver-3.0-RC-war.zip/download"
-          
-          echo "Fetching Stable Core Extensions..."
-          curl -L -s -o geoserver-3.0-RC-vectortiles-plugin.zip \
-            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/extensions-RC/geoserver-3.0-RC-vectortiles-plugin.zip/download"
-          curl -L -s -o geoserver-3.0-RC-control-flow-plugin.zip \
-            "https://sourceforge.net/projects/geoserver/files/GeoServer/3.0-RC/extensions-RC/geoserver-3.0-RC-control-flow-plugin.zip/download"
-          
-          echo "Fetching Community/Raster Extensions from OSGeo Release Storage..."
-          curl -L -s -o geoserver-3.0-SNAPSHOT-imagemosaic-jdbc-plugin.zip \
-            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-imagemosaic-jdbc/3.0.0/gs-imagemosaic-jdbc-3.0.0.zip"
-          curl -L -s -o geoserver-3.0-SNAPSHOT-cog-http-plugin.zip \
-            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-http/3.0.0/gs-cog-http-3.0.0.zip"
-          curl -L -s -o geoserver-3.0-SNAPSHOT-cog-s3-plugin.zip \
-            "https://repo.osgeo.org/repository/release/org/geoserver/community/gs-cog/gs-cog-s3/3.0.0/gs-cog-s3-3.0.0.zip"
+      # No manual artifact download any more: the 3.x Dockerfile fetches the stable WAR,
+      # verifies Tomcat, and builds fips/cog-s3/cog-http from the matching git tag itself.
 
-      # =============================================================
-      # Build step (Loads locally for scanning)
-      # =============================================================
-      - name: Build and Load Image
-        uses: docker/build-push-action@v5
+      - name: Build and load image (for scanning/testing)
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          load: true 
+          load: true
+          build-args: |
+            ${{ matrix.gs_version != '' && format('GS_VERSION={0}', matrix.gs_version) || '' }}
           tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
+          cache-from: type=gha,scope=${{ matrix.image_identifier }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image_identifier }}
 
-      # =============================================================
-      # Vulnerability Scanning (Configured NOT to fail the build)
-      # =============================================================
-      - name: Run Trivy (Table output for logs)
-        uses: aquasecurity/trivy-action@master
+      - name: Smoke test (starts and serves WMS capabilities)
+        if: matrix.smoke_test
+        run: |
+          docker run -d --name gs -p 8080:8080 \
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:8080/geoserver/ows?service=wms&version=1.3.0&request=GetCapabilities" >/dev/null 2>&1; then
+              echo "up after $i tries"; exit 0
+            fi
+            sleep 5
+          done
+          docker logs gs | tail -100; exit 1
+        # GitHub runners are not FIPS hosts: this proves the image boots, NOT that FIPS works.
+        # Run scripts/verify-fips.sh on a FIPS host for that.
+
+      # Scan findings must never block the build or the push. exit-code "0" ignores findings;
+      # continue-on-error also covers scanner/infrastructure failures (DB download rate limits, etc.).
+      - name: Run Trivy (table output for logs)
+        uses: aquasecurity/trivy-action@0.28.0   # pinned instead of @master
+        continue-on-error: true
         with:
           image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0' # <--- Crucial: 0 ensures CRITICAL/HIGH bypass blocking
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"     # report only; set "1" to gate pushes on findings
 
       - name: Run Trivy (SARIF for Security tab)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
+        continue-on-error: true
         with:
           image-ref: ${{ env.REGISTRY }}/${{ matrix.image_name }}:temp-${{ matrix.image_identifier }}
-          format: 'sarif'
-          output: 'trivy-results-${{ matrix.image_identifier }}.sarif'
-          severity: 'CRITICAL,HIGH'
+          format: sarif
+          output: trivy-results-${{ matrix.image_identifier }}.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "0"
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
-        if: always() # Uploads even if previous steps found issues
+        if: always()
+        continue-on-error: true   # fails on private repos without Code Scanning and on fork PRs
         with:
-          sarif_file: 'trivy-results-${{ matrix.image_identifier }}.sarif'
+          sarif_file: trivy-results-${{ matrix.image_identifier }}.sarif
+          category: trivy-${{ matrix.image_identifier }}   # without this, matrix runs overwrite each other
 
-      # =============================================================
-      # Final Production Step: Push the verified image to GHCR
-      # =============================================================
-      - name: Build and Push Final Production Image
-        uses: docker/build-push-action@v5
+      # Re-uses the cached layers from the first build, so this is fast and pushes
+      # the same content that was just scanned.
+      - name: Build and push production image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}
+          build-args: |
+            ${{ matrix.gs_version != '' && format('GS_VERSION={0}', matrix.gs_version) || '' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}
+            ${{ env.REGISTRY }}/${{ matrix.image_name }}:${{ matrix.prod_tag }}-${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image_identifier }}
+          provenance: true
+          sbom: true
