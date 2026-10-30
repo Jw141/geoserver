@@ -33,7 +33,7 @@ rm -rf "$WAR/data"
 # 3. assertions
 echo "--- BouncyCastle jars now present:"; ls "$LIB" | grep -i '^bc' || true
 if ls "$LIB" | grep -Ei '^bc.*(lts8on|jdk1[0-9]on|jdk15)'; then echo "ERROR: non-FIPS BouncyCastle jar present" >&2; exit 1; fi
-for want in bc-fips bcpkix-fips bcutil-fips gs-fips-provider gs-web-fips gs-cog-core gs-cog-http gs-cog-s3; do
+for want in bc-fips bcpkix-fips bcutil-fips gs-fips-provider gs-web-fips gs-cog-core gs-cog-http gs-cog-s3 gs-sec-keycloak-roles-core gs-sec-keycloak-roles-web; do
   compgen -G "$LIB/${want}-[0-9]*.jar" >/dev/null || { echo "ERROR: missing $want" >&2; exit 1; }
 done
 compgen -G "$LIB/*duckdb*.jar" >/dev/null || { echo "ERROR: no duckdb jars" >&2; exit 1; }

@@ -100,7 +100,9 @@ RUN dnf -y upgrade --refresh \
 
 ENV CATALINA_HOME=/opt/tomcat \
     GEOSERVER_DATA_DIR=/opt/geoserver_data \
-    JAVA_HOME=/usr/lib/jvm/jre-21-openjdk
+    # JRE_HOME, not JAVA_HOME: Tomcat's startup scripts demand a JDK (javac present) when JAVA_HOME is set,
+    # and we deliberately ship only the headless JRE.
+    JRE_HOME=/usr/lib/jvm/jre-21-openjdk
 
 RUN useradd --system --uid ${GS_UID} --gid 0 --no-create-home --home-dir /opt/tomcat --shell /sbin/nologin geoserver \
  && mkdir -p ${GEOSERVER_DATA_DIR}

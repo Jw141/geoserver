@@ -6,7 +6,7 @@ Hardened GeoServer 3.0.x container for FIPS-enabled hosts.
 - Java: Rocky-packaged OpenJDK 21 (reads the system crypto policy)
 - Tomcat 11 (GeoServer 3 requires Servlet 6.1)
 - GeoServer 3.0.2 (stable WAR from SourceForge)
-- Plugins: `fips`, `cog-s3`, `cog-http`, `duckdb` — community modules, **built from the 3.0.2 git tag** (they are not published with stable releases)
+- Plugins: `fips`, `cog-s3`, `cog-http`, `duckdb`, `sec-keycloak-roles` — community modules, **built from the 3.0.2 git tag** (they are not published with stable releases)
 - Runs as non-root (uid 10001), no default Tomcat apps, shutdown port off, version info hidden
 
 ## Build

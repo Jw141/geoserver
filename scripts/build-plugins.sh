@@ -11,14 +11,20 @@ OUT=/out/lib; mkdir -p "$OUT"
 MVN="mvn -B -ntp -DskipTests -Dmaven.javadoc.skip=true"
 COPY="-DoutputDirectory=$OUT -DincludeScope=runtime -Dmdep.useRepositoryLayout=false"
 
+# Fail early and clearly if a module is not present in this GeoServer tag
+for m in community/fips community/cog community/duckdb community/keycloak-roles; do
+  test -f "$m/pom.xml" || { echo "ERROR: $m/pom.xml not found in this GeoServer tag" >&2; exit 1; }
+done
+
 # NOTE: called inside `if !`, where `set -e` is disabled, so steps are chained with && explicitly.
 strategy_a() {
   $MVN -f community/cog/pom.xml -pl cog-core,cog-s3,cog-http package dependency:copy-dependencies $COPY \
   && $MVN -f community/fips/pom.xml package dependency:copy-dependencies $COPY \
-  && $MVN -f community/duckdb/pom.xml package dependency:copy-dependencies $COPY
+  && $MVN -f community/duckdb/pom.xml package dependency:copy-dependencies $COPY \
+  && $MVN -f community/keycloak-roles/pom.xml package dependency:copy-dependencies $COPY
 }
 strategy_b() {
-  $MVN -PcommunityRelease -pl community/fips,community/cog/cog-core,community/cog/cog-s3,community/cog/cog-http,community/duckdb -am \
+  $MVN -PcommunityRelease -pl community/fips,community/cog/cog-core,community/cog/cog-s3,community/cog/cog-http,community/duckdb,community/keycloak-roles -am \
        install dependency:copy-dependencies $COPY
 }
 
@@ -28,7 +34,7 @@ if ! strategy_a; then
 fi
 
 # module jars themselves
-find community/cog community/fips community/duckdb -path '*/target/*.jar' \
+find community/cog community/fips community/duckdb community/keycloak-roles -path '*/target/*.jar' \
      ! -name '*-tests.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp -f {} "$OUT"/ \;
 ls "$OUT" | wc -l
-ls "$OUT" | grep -Ei 'fips|cog' >/dev/null && ls "$OUT" | grep -Ei 'duckdb' || { echo "expected fips/cog/duckdb jars missing" >&2; exit 1; }
+ls "$OUT" | grep -Ei 'fips|cog' >/dev/null && ls "$OUT" | grep -Ei 'duckdb' >/dev/null && ls "$OUT" | grep -Ei 'sec-keycloak-roles' || { echo "expected fips/cog/duckdb/keycloak-roles jars missing" >&2; exit 1; }
