@@ -5,10 +5,11 @@
 # Strategy A (fast): build each module group in its own small reactor. Core gs-* 3.0.x
 #   artifacts are resolved from the OSGeo release repository, NOT rebuilt.
 # Strategy B (fallback): full-reactor build with the communityRelease profile (slow).
-set -euxo pipefail
+set -euo pipefail
 cd src
 OUT=/out/lib; mkdir -p "$OUT"
-MVN="mvn -B -ntp -DskipTests -Dmaven.javadoc.skip=true"
+# No -T (parallel): modules copy dependencies into the same directory and would race.
+MVN="mvn -B -ntp -DskipTests -Dmaven.javadoc.skip=true -Dmaven.source.skip=true"
 COPY="-DoutputDirectory=$OUT -DincludeScope=runtime -Dmdep.useRepositoryLayout=false"
 
 # Fail early and clearly if a module is not present in this GeoServer tag
@@ -36,5 +37,7 @@ fi
 # module jars themselves
 find community/cog community/fips community/duckdb community/keycloak-roles -path '*/target/*.jar' \
      ! -name '*-tests.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' -exec cp -f {} "$OUT"/ \;
-ls "$OUT" | wc -l
-ls "$OUT" | grep -Ei 'fips|cog' >/dev/null && ls "$OUT" | grep -Ei 'duckdb' >/dev/null && ls "$OUT" | grep -Ei 'sec-keycloak-roles' || { echo "expected fips/cog/duckdb/keycloak-roles jars missing" >&2; exit 1; }
+echo "collected $(ls "$OUT" | wc -l) jars"
+for want in fips cog duckdb sec-keycloak-roles; do
+  ls "$OUT" | grep -qi "$want" || { echo "ERROR: no $want jars collected" >&2; exit 1; }
+done

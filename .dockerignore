@@ -1,0 +1,5 @@
+# Allow-list: only what the build needs goes into the context
+*
+!Dockerfile
+!scripts/build-plugins.sh
+!scripts/assemble-plugins.sh

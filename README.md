@@ -7,7 +7,7 @@ Hardened GeoServer 3.0.x container for FIPS-enabled hosts.
 - Tomcat 11 (GeoServer 3 requires Servlet 6.1)
 - GeoServer 3.0.2 (stable WAR from SourceForge)
 - Plugins: `fips`, `cog-s3`, `cog-http`, `duckdb`, `sec-keycloak-roles` — community modules, **built from the 3.0.2 git tag** (they are not published with stable releases)
-- Runs as non-root (uid 10001), no default Tomcat apps, shutdown port off, version info hidden
+- Runs as non-root (uid 10001); application files are root-owned and read-only to it; no default Tomcat apps, auto-deploy and shutdown port off, version info hidden
 
 ## Build
     docker build -t geoserver-fips:dev .
@@ -22,7 +22,7 @@ approved-only mode on, OS FIPS mode yes, provider position first.
 ## Things to know
 1. **New data directory required.** A FIPS GeoServer cannot open a data directory created by a normal one
    (keystore JCEKS -> BCFKS, password encryption crypt3). No migration tool yet.
-2. Community modules must match the core build exactly, so the Dockerfile builds them from the git tag. First build is slow (Maven compiles GeoServer core modules); BuildKit caches `~/.m2`. Override with `--build-arg GS_VERSION=3.0.3`; set `GS_WAR_SHA256` to pin the WAR.
+2. Community modules must match the core build exactly, so the Dockerfile builds them from the git tag. The plugin build normally resolves GeoServer core jars from the OSGeo repository and only compiles the community modules; if that fails it falls back to a full (slow) build. Override with `--build-arg GS_VERSION=3.0.3`; set `GS_WAR_SHA256` to pin the WAR.
 3. The module does not put the host in FIPS mode; that is a kernel boot setting.
 4. `cog-http` is assumed to be what was meant by "cot-http".
 

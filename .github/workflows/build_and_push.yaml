@@ -8,6 +8,10 @@ on:
   schedule:
     - cron: "0 6 * * 1"    # weekly rebuild for base-image / OS package fixes
 
+concurrency:                 # cancel superseded runs on the same branch/PR
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: jw141/geoserver
@@ -17,6 +21,7 @@ env:
 jobs:
   build-and-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -83,6 +88,7 @@ jobs:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:temp
           format: sarif
           output: trivy-results.sarif
+          skip-setup-trivy: true       # reuse the Trivy binary installed by the previous step
           severity: CRITICAL,HIGH
           limit-severities-for-sarif: true
           exit-code: "0"
