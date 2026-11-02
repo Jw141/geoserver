@@ -39,6 +39,17 @@ RUN git clone --depth 1 --single-branch --branch "${GS_GIT_REF}" https://github.
 COPY scripts/build-plugins.sh /usr/local/bin/build-plugins.sh
 RUN --mount=type=cache,target=/root/.m2 bash /usr/local/bin/build-plugins.sh
 
+# Security overrides: fetch newer versions of specific jars (see jar-overrides.txt).
+# Separate layer, so editing the list does not rebuild the plugins.
+COPY jar-overrides.txt /tmp/jar-overrides.txt
+RUN --mount=type=cache,target=/root/.m2 set -eu; \
+    mkdir -p /out/overrides; cd /tmp; \
+    grep -vE '^[[:space:]]*(#|$)' /tmp/jar-overrides.txt | while read -r a; do \
+      echo "override: $a"; \
+      mvn -B -ntp -q -C dependency:copy -Dartifact="$a" -DoutputDirectory=/out/overrides; \
+    done; \
+    ls -l /out/overrides
+
 ############################################################################
 # Stage 2: assemble webapp (stable WAR + FIPS jar swap + plugins) inside Tomcat
 ############################################################################
@@ -73,11 +84,12 @@ RUN set -eux; \
     grep -q 'port="-1"' conf/server.xml && grep -q showServerInfo conf/server.xml && grep -q 'autoDeploy="false"' conf/server.xml
 
 COPY --from=plugins /out/lib /build/plugin-lib
+COPY --from=plugins /out/overrides /build/overrides
 COPY scripts/assemble-plugins.sh /usr/local/bin/assemble-plugins.sh
 # Set final permissions HERE so the runtime stage needs no recursive chmod/chown
 # (which would duplicate the whole webapp into a second image layer).
 RUN set -eux; \
-    bash /usr/local/bin/assemble-plugins.sh /build/geoserver /build/plugin-lib; \
+    bash /usr/local/bin/assemble-plugins.sh /build/geoserver /build/plugin-lib /build/overrides; \
     mv /build/geoserver tomcat/webapps/geoserver; \
     mkdir -p tomcat/conf/Catalina/localhost; \
     chmod -R a+rX,go-w tomcat

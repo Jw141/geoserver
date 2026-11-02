@@ -9,8 +9,11 @@ Hardened GeoServer 3.0.x container for FIPS-enabled hosts.
 - Plugins: `fips`, `cog-s3`, `cog-http`, `duckdb`, `sec-keycloak-roles` — community modules, **built from the 3.0.2 git tag** (they are not published with stable releases)
 - Runs as non-root (uid 10001); application files are root-owned and read-only to it; no default Tomcat apps, auto-deploy and shutdown port off, version info hidden
 
-## Build
-    docker build -t geoserver-fips:dev .
+## Build and test locally (e.g. in a Codespace)
+    scripts/local-test.sh                   # build + smoke test, leaves GeoServer running on :8080
+    scripts/local-test.sh --target plugins  # build only up to one stage
+
+This is the same build and smoke test as CI. It is not a FIPS test (see below).
 
 ## Run (on a FIPS host: `cat /proc/sys/crypto/fips_enabled` -> 1)
     mkdir -p data && sudo chown 10001:0 data
@@ -44,3 +47,10 @@ If the JVM still crashes: grab `/opt/tomcat/logs/hs_err_pid*.log` (the "Problema
 - DuckDB's native code and its extensions (e.g. httpfs, spatial) do their own crypto and are **outside** the BouncyCastle FIPS
   boundary. Stores are read-only by default; check with your compliance owner before enabling remote (https/S3) access from DuckDB.
 - Extensions cannot be downloaded at runtime in an air-gapped environment.
+
+## Security overrides (`jar-overrides.txt`)
+Bumps individual jars to versions with CVE fixes when GeoServer has not caught up yet.
+Fetched from Maven Central with strict checksums; a line is skipped automatically if the
+image already ships a newer version. Review the list on every GeoServer upgrade, and re-run
+the smoke test and FIPS checks after changing it. `bc-fips` is deliberately commented out:
+only CMVP-listed versions are FIPS 140 validated.

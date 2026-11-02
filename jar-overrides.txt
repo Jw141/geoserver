@@ -1,0 +1,17 @@
+# Jars to force to a newer version for security fixes.
+# Format: groupId:artifactId:version  (fetched from Maven Central with strict checksum checking)
+# Each one replaces any version of the same artifact in the image, UNLESS the image already
+# has a newer version (then the override is skipped with a warning; remove stale lines).
+# Re-check this list on every GeoServer upgrade.
+
+# CVE-2026-102554 (HIGH): Guava deserialization DoS
+com.google.guava:guava:33.7.2-jre
+
+# CVE-2026-54428 (HIGH): HTTP/2 HPACK DoS. httpcore5 and httpcore5-h2 must stay on the same version.
+org.apache.httpcomponents.core5:httpcore5:5.4.3
+org.apache.httpcomponents.core5:httpcore5-h2:5.4.3
+
+# CVE-2026-8763 (CRITICAL), CVE-2026-13505/13506/8798 (HIGH): BouncyCastle FIPS.
+# Disabled until confirmed: only the bc-fips versions listed on the NIST CMVP certificate
+# are FIPS 140 validated. Enable only if 2.1.3 is covered or your compliance owner accepts it.
+#org.bouncycastle:bc-fips:2.1.3

@@ -3,3 +3,4 @@
 !Dockerfile
 !scripts/build-plugins.sh
 !scripts/assemble-plugins.sh
+!jar-overrides.txt
