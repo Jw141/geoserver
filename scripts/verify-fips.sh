@@ -17,7 +17,7 @@ trap cleanup EXIT
 [ "$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)" = "1" ] && pass "host kernel FIPS=1" || fail "host is not in FIPS mode"
 
 # 2. JVM starts and sees FIPS on this host (no gateway: plain java, no GeoServer)
-$RT run --rm --entrypoint /usr/lib/jvm/jre-21-openjdk/bin/java "$IMAGE" -version >/dev/null 2>&1 \
+$RT run --rm --entrypoint /opt/java/bin/java "$IMAGE" -version >/dev/null 2>&1 \
   && pass "java -version (no SIGSEGV)" || fail "java -version crashed or failed"
 $RT run --rm --entrypoint /bin/cat "$IMAGE" /proc/sys/crypto/fips_enabled | grep -q 1 && pass "container sees fips_enabled=1" || fail "container does not see fips_enabled=1"
 $RT run --rm --entrypoint /bin/cat "$IMAGE" /etc/crypto-policies/config | grep -q '^FIPS' \

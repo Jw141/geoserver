@@ -93,20 +93,29 @@ LABEL org.opencontainers.image.title="geoserver-fips" \
       org.opencontainers.image.description="Hardened GeoServer ${GS_VERSION} (FIPS, cog-s3, cog-http, duckdb, sec-keycloak-roles) on Rocky Linux 9"
 
 # Patch the whole base image (the digest-pinned base is only as fresh as when it was published),
-# install the JRE, set the FIPS crypto policy, strip setuid/setgid bits. One layer.
-RUN dnf -y upgrade --refresh \
- && dnf -y install --setopt=install_weak_deps=False --nodocs \
-        java-21-openjdk-headless nss openssl-libs fontconfig freetype dejavu-sans-fonts crypto-policies-scripts \
- && update-crypto-policies --set FIPS \
- && dnf -y remove crypto-policies-scripts \
- && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf* /var/lib/dnf/history* \
- && (find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true)
+# install the JRE and runtime libraries, set the FIPS crypto policy, strip setuid/setgid bits.
+# NOTE: crypto-policies-scripts must stay installed. The Java package depends on it, so
+# "dnf remove crypto-policies-scripts" silently removes Java as well.
+RUN set -eux; \
+    dnf -y upgrade --refresh; \
+    dnf -y install --setopt=install_weak_deps=False --nodocs \
+        java-21-openjdk-headless nss openssl-libs crypto-policies crypto-policies-scripts \
+        fontconfig freetype dejavu-sans-fonts; \
+    update-crypto-policies --set FIPS; \
+    JHOME="$(dirname "$(dirname "$(readlink -f /usr/bin/java)")")"; \
+    ln -s "${JHOME}" /opt/java; \
+    dnf clean all; rm -rf /var/cache/dnf /var/log/dnf* /var/lib/dnf/history*; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true; \
+    # final assertions, AFTER every dnf operation in this layer
+    rpm -q java-21-openjdk-headless nss openssl-libs crypto-policies fontconfig freetype dejavu-sans-fonts; \
+    grep -qx FIPS /etc/crypto-policies/config; \
+    /opt/java/bin/java -version
 
-# JRE_HOME, not JAVA_HOME: Tomcat's scripts demand a JDK (javac) when JAVA_HOME is set,
-# and we deliberately ship only the headless JRE.
+# /opt/java is a stable link to the real JRE install dir, resolved at build time
+# (the /usr/lib/jvm/jre-* alias names vary by package version). Tomcat runs java via JRE_HOME.
 ENV CATALINA_HOME=/opt/tomcat \
     GEOSERVER_DATA_DIR=/opt/geoserver_data \
-    JRE_HOME=/usr/lib/jvm/jre-21-openjdk \
+    JRE_HOME=/opt/java \
     JAVA_OPTS="-Djava.awt.headless=true -XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8 -XX:ErrorFile=/opt/tomcat/logs/hs_err_pid%p.log"
 # Do NOT add -Dorg.bouncycastle.fips.approved_only=false; the FIPS module turns approved-only on.
 
@@ -120,6 +129,8 @@ RUN useradd --system --uid ${GS_UID} --gid 0 --no-create-home --home-dir ${CATAL
  && chmod -R g=u logs temp work conf/Catalina ${GEOSERVER_DATA_DIR}
 
 USER ${GS_UID}
+# Build-time check, as the service user: the JVM runs and Tomcat accepts JRE_HOME
+RUN "${JRE_HOME}/bin/java" -version && "${CATALINA_HOME}/bin/catalina.sh" version
 WORKDIR ${CATALINA_HOME}
 VOLUME ["/opt/geoserver_data"]
 EXPOSE 8080
